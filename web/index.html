@@ -1,4 +1,4 @@
-<!DOCTYPE html>
+﻿<!DOCTYPE html>
 <html lang="zh-Hant">
 <head>
   <meta charset="UTF-8">
@@ -188,6 +188,72 @@
       color: var(--error);
     }
 
+    .progress-shell {
+      display: none;
+      margin-top: 16px;
+      padding: 14px;
+      border-radius: 16px;
+      background: rgba(244, 238, 226, 0.92);
+      border: 1px solid rgba(217, 201, 168, 0.9);
+    }
+
+    .progress-shell[data-active="true"] {
+      display: block;
+    }
+
+    .progress-meta {
+      display: flex;
+      justify-content: space-between;
+      gap: 12px;
+      margin-bottom: 10px;
+      color: var(--muted);
+      font-size: 0.9rem;
+    }
+
+    .progress-track {
+      position: relative;
+      width: 100%;
+      height: 12px;
+      overflow: hidden;
+      border-radius: 999px;
+      background: rgba(203, 184, 145, 0.36);
+    }
+
+    .progress-bar {
+      width: 18%;
+      height: 100%;
+      border-radius: 999px;
+      background: linear-gradient(90deg, #b85c38, #db9467, #b85c38);
+      background-size: 200% 100%;
+      animation: loading-slide 1.35s ease-in-out infinite, shimmer 1.2s linear infinite;
+      transform: translateX(-130%);
+    }
+
+    .progress-steps {
+      margin-top: 10px;
+      color: var(--muted);
+      font-size: 0.88rem;
+      line-height: 1.6;
+    }
+
+    @keyframes loading-slide {
+      0% {
+        transform: translateX(-130%);
+      }
+      100% {
+        transform: translateX(580%);
+      }
+    }
+
+    @keyframes shimmer {
+      0% {
+        background-position: 0% 50%;
+      }
+      100% {
+        background-position: 200% 50%;
+      }
+    }
+
     .footer {
       padding: 0 28px 26px;
       color: var(--muted);
@@ -212,8 +278,8 @@
 <body>
   <main class="shell">
     <section class="hero">
-      <h1>BreezyVoice Batch TTS</h1>
-      <p>上傳 prompt 音檔、對應文字與一份批次 CSV，網頁會呼叫同一台服務上的 API，將所有文字批次轉成 WAV，最後自動打包成 ZIP 供你下載。</p>
+      <h1>NCDR 2.1.4專案 Text-To-Speech服務</h1>
+      <p>上傳Vocal音檔與對應文字作為生成語音的聲音，批次 CSV僅需上傳一行標題為content_to_synthesize，內容為要轉換語音的文字，網頁會呼叫同一台服務上的 API，將所有文字批次轉成 WAV，最後自動打包成 ZIP 供你下載。</p>
     </section>
 
     <section class="grid">
@@ -246,6 +312,17 @@
           <a id="download-link" class="download-link" download="breezyvoice-batch.zip">下載 ZIP</a>
         </div>
 
+        <div id="progress-shell" class="progress-shell" aria-live="polite">
+          <div class="progress-meta">
+            <span id="progress-label">準備中</span>
+            <span id="elapsed-time">0s</span>
+          </div>
+          <div class="progress-track" aria-hidden="true">
+            <div class="progress-bar"></div>
+          </div>
+          <div id="progress-steps" class="progress-steps">正在整理上傳資料。</div>
+        </div>
+
         <div id="status" class="status" aria-live="polite"></div>
       </form>
 
@@ -269,6 +346,12 @@ demo,歡迎使用 BreezyVoice 的批次文字轉語音功能</div>
     const statusEl = document.getElementById("status");
     const submitButton = document.getElementById("submit-button");
     const downloadLink = document.getElementById("download-link");
+    const progressShell = document.getElementById("progress-shell");
+    const progressLabel = document.getElementById("progress-label");
+    const progressSteps = document.getElementById("progress-steps");
+    const elapsedTime = document.getElementById("elapsed-time");
+    let progressTimer = null;
+    let progressStageTimer = null;
 
     function setStatus(message, state = "") {
       statusEl.textContent = message;
@@ -280,10 +363,60 @@ demo,歡迎使用 BreezyVoice 的批次文字轉語音功能</div>
       downloadLink.removeAttribute("href");
     }
 
+    function stopProgress() {
+      if (progressTimer) {
+        clearInterval(progressTimer);
+        progressTimer = null;
+      }
+      if (progressStageTimer) {
+        clearTimeout(progressStageTimer);
+        progressStageTimer = null;
+      }
+      progressShell.dataset.active = "false";
+    }
+
+    function startProgress() {
+      const startedAt = Date.now();
+      progressShell.dataset.active = "true";
+      progressLabel.textContent = "執行中";
+      progressSteps.textContent = "正在上傳檔案並建立批次工作。";
+      elapsedTime.textContent = "0s";
+
+      progressTimer = setInterval(() => {
+        const seconds = Math.floor((Date.now() - startedAt) / 1000);
+        elapsedTime.textContent = `${seconds}s`;
+      }, 500);
+
+      const stages = [
+        { delay: 1400, label: "上傳完成", detail: "伺服器已收到 prompt 音檔、文字與 CSV。" },
+        { delay: 5000, label: "模型處理中", detail: "正在逐筆合成語音，批次越大等待越久。" },
+        { delay: 11000, label: "壓縮中", detail: "正在整理 WAV 並建立 ZIP 檔案。" }
+      ];
+
+      let index = 0;
+      const advance = () => {
+        if (index >= stages.length) {
+          progressLabel.textContent = "仍在執行";
+          progressSteps.textContent = "服務仍在處理中，請保持此頁面開啟。";
+          return;
+        }
+        const stage = stages[index];
+        progressLabel.textContent = stage.label;
+        progressSteps.textContent = stage.detail;
+        index += 1;
+        if (index < stages.length) {
+          progressStageTimer = setTimeout(advance, stages[index].delay - stage.delay);
+        }
+      };
+
+      progressStageTimer = setTimeout(advance, stages[0].delay);
+    }
+
     form.addEventListener("submit", async (event) => {
       event.preventDefault();
       resetDownload();
       setStatus("準備送出批次工作，這可能需要一些時間。");
+      startProgress();
       submitButton.disabled = true;
 
       const formData = new FormData();
@@ -294,6 +427,7 @@ demo,歡迎使用 BreezyVoice 的批次文字轉語音功能</div>
 
       if (!promptAudio || !batchCsv || !promptText) {
         setStatus("請先補齊 prompt 音檔、prompt 文字與 CSV。", "error");
+        stopProgress();
         submitButton.disabled = false;
         return;
       }
@@ -325,11 +459,14 @@ demo,歡迎使用 BreezyVoice 的批次文字轉語音功能</div>
         const url = URL.createObjectURL(blob);
         downloadLink.href = url;
         downloadLink.style.display = "inline-flex";
+        progressLabel.textContent = "完成";
+        progressSteps.textContent = "ZIP 已準備完成，瀏覽器即將開始下載。";
         downloadLink.click();
         setStatus("批次合成完成，ZIP 已準備好下載。", "success");
       } catch (error) {
         setStatus(error.message || "批次合成失敗。", "error");
       } finally {
+        stopProgress();
         submitButton.disabled = false;
       }
     });

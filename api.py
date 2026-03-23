@@ -8,7 +8,9 @@ import zipfile
 from contextlib import asynccontextmanager
 from io import BytesIO
 from pathlib import Path
+from typing import Any
 
+import onnxruntime
 import torchaudio
 from fastapi import APIRouter, FastAPI, File, Form, HTTPException, Request, UploadFile, status
 from fastapi.responses import FileResponse, StreamingResponse
@@ -163,11 +165,29 @@ def parse_batch_rows(csv_bytes: bytes) -> list[dict[str, str]]:
     return rows
 
 
+def create_bopomofo_converter() -> G2PWConverter:
+    original_inference_session = onnxruntime.InferenceSession
+    available_providers = onnxruntime.get_available_providers()
+    default_providers = ["CPUExecutionProvider"]
+    if "CPUExecutionProvider" not in available_providers and available_providers:
+        default_providers = [available_providers[0]]
+
+    def patched_inference_session(*args: Any, **kwargs: Any):
+        kwargs.setdefault("providers", default_providers)
+        return original_inference_session(*args, **kwargs)
+
+    onnxruntime.InferenceSession = patched_inference_session
+    try:
+        return G2PWConverter()
+    finally:
+        onnxruntime.InferenceSession = original_inference_session
+
+
 @asynccontextmanager
 async def lifespan(app: FastAPI):
     app.state.settings = Settings()
     app.state.cosyvoice = CustomCosyVoice(app.state.settings.model_path)
-    app.state.bopomofo_converter = G2PWConverter()
+    app.state.bopomofo_converter = create_bopomofo_converter()
     app.state.prompt_speech_16k = load_wav(
         app.state.settings.speaker_prompt_audio_path, 16000
     )

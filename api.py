@@ -58,6 +58,8 @@ class BatchJobResponse(BaseModel):
     status: str
     completed: int
     total: int
+    current: int = 0
+    current_filename: str | None = None
     download_url: str | None = None
     error: str | None = None
 
@@ -220,6 +222,8 @@ def serialize_job(job_id: str, job: dict[str, Any]) -> BatchJobResponse:
         status=job["status"],
         completed=job["completed"],
         total=job["total"],
+        current=job.get("current", 0),
+        current_filename=job.get("current_filename"),
         download_url=download_url,
         error=job.get("error"),
     )
@@ -254,6 +258,8 @@ def create_batch_job(
             "status": "queued",
             "completed": 0,
             "total": len(rows),
+            "current": 0,
+            "current_filename": None,
             "rows": rows,
             "prompt_path": str(prompt_path),
             "prompt_text": speaker_prompt_text_transcription,
@@ -278,6 +284,11 @@ def run_batch_job(app: FastAPI, job_id: str) -> None:
         with zipfile.ZipFile(zip_path, "w", compression=zipfile.ZIP_DEFLATED) as zip_file:
             manifest_rows = ["filename,text"]
             for index, row in enumerate(job["rows"], start=1):
+                set_job_state(
+                    job_id,
+                    current=index,
+                    current_filename=f"{row['filename']}.wav",
+                )
                 wav_bytes = synthesize_wav_bytes(
                     app.state.cosyvoice,
                     prompt_speech_16k,
@@ -291,7 +302,7 @@ def run_batch_job(app: FastAPI, job_id: str) -> None:
                 set_job_state(job_id, completed=index)
             zip_file.writestr("manifest.csv", "\n".join(manifest_rows).encode("utf-8"))
 
-        set_job_state(job_id, status="completed")
+        set_job_state(job_id, status="completed", current=job["total"])
     except Exception as exc:
         set_job_state(job_id, status="failed", error=str(exc))
 

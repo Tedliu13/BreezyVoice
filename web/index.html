@@ -229,6 +229,13 @@
       animation: shimmer 1.2s linear infinite;
     }
 
+    .progress-detail {
+      margin-top: 10px;
+      color: var(--muted);
+      font-size: 0.9rem;
+      line-height: 1.5;
+    }
+
     @keyframes shimmer {
       0% {
         background-position: 0% 50%;
@@ -262,7 +269,7 @@
 <body>
   <main class="shell">
     <section class="hero">
-      <h1>NCDR 2.1.4專案 Text-To-Speech服務</h1>
+      <h1>2.1.4 Text-To-Speech服務</h1>
       <p>上傳Vocal音檔與對應文字作為生成語音的聲音，批次 CSV僅需上傳一行標題為content_to_synthesize，內容為要轉換語音的文字，網頁會呼叫同一台服務上的 API，將所有文字批次轉成 WAV，最後自動打包成 ZIP 供你下載。</p>
     </section>
 
@@ -299,11 +306,12 @@
         <div id="progress-shell" class="progress-shell" aria-live="polite">
           <div class="progress-meta">
             <span id="progress-label">準備中</span>
-            <span id="progress-count">0 / 0</span>
+            <span id="progress-count">已完成 0 / 0</span>
           </div>
           <div class="progress-track" aria-hidden="true">
             <div id="progress-bar" class="progress-bar"></div>
           </div>
+          <div class="progress-detail" id="progress-current">尚未開始處理。</div>
           <div class="progress-meta" style="margin-top: 10px; margin-bottom: 0;">
             <span id="progress-steps">正在整理上傳資料。</span>
             <span id="elapsed-time">0s</span>
@@ -337,6 +345,7 @@ demo,歡迎使用 BreezyVoice 的批次文字轉語音功能</div>
     const progressLabel = document.getElementById("progress-label");
     const progressSteps = document.getElementById("progress-steps");
     const progressCount = document.getElementById("progress-count");
+    const progressCurrent = document.getElementById("progress-current");
     const progressBar = document.getElementById("progress-bar");
     const elapsedTime = document.getElementById("elapsed-time");
     let progressTimer = null;
@@ -364,7 +373,8 @@ demo,歡迎使用 BreezyVoice 的批次文字轉語音功能</div>
       progressShell.dataset.active = "true";
       progressLabel.textContent = "建立工作中";
       progressSteps.textContent = "正在上傳檔案並建立批次工作。";
-      progressCount.textContent = "0 / 0";
+      progressCount.textContent = "已完成 0 / 0";
+      progressCurrent.textContent = "尚未開始處理。";
       progressBar.style.width = "0%";
       elapsedTime.textContent = "0s";
 
@@ -377,23 +387,36 @@ demo,歡迎使用 BreezyVoice 的批次文字轉語音功能</div>
     function updateProgress(job) {
       const total = job.total || 0;
       const completed = job.completed || 0;
+      const current = job.current || 0;
+      const currentFilename = job.current_filename || "";
       const percent = total > 0 ? Math.min(100, (completed / total) * 100) : 0;
-      progressCount.textContent = `${completed} / ${total}`;
+
+      progressCount.textContent = `已完成 ${completed} / ${total}`;
       progressBar.style.width = `${percent}%`;
 
       if (job.status === "queued") {
         progressLabel.textContent = "排隊中";
         progressSteps.textContent = "批次工作已建立，等待開始處理。";
+        progressCurrent.textContent = `待處理，共 ${total} 筆。`;
       } else if (job.status === "processing") {
         progressLabel.textContent = "模型處理中";
         progressSteps.textContent = "正在逐筆合成語音。";
+        if (current > 0) {
+          progressCurrent.textContent = currentFilename
+            ? `目前處理第 ${current} / ${total} 筆：${currentFilename}`
+            : `目前處理第 ${current} / ${total} 筆。`;
+        } else {
+          progressCurrent.textContent = `正在準備處理，共 ${total} 筆。`;
+        }
       } else if (job.status === "completed") {
         progressLabel.textContent = "完成";
         progressSteps.textContent = "全部 WAV 已產生並打包完成。";
+        progressCurrent.textContent = `全部 ${total} 筆已完成。`;
         progressBar.style.width = "100%";
       } else if (job.status === "failed") {
         progressLabel.textContent = "失敗";
         progressSteps.textContent = job.error || "批次工作失敗。";
+        progressCurrent.textContent = `已完成 ${completed} / ${total}。`;
       }
     }
 

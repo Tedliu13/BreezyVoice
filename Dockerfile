@@ -14,7 +14,7 @@ RUN apt-get update && \
 
 COPY requirements.txt /breezyvoice/requirements.txt
 
-RUN uv pip install setuptools wheel && \
+RUN uv pip install "setuptools<81" wheel && \
     uv pip install -r requirements.txt --index-strategy unsafe-best-match --no-build-isolation
 
 COPY . .

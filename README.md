@@ -170,6 +170,8 @@ For OpenAI-compatible clients, use the `/v1` prefix in the base URL, for example
 
 - Connect this repository as a service directly. Railway will build from the repo's
   `Dockerfile`.
+- You can import suggested variables from `.env.example` when setting up the
+  Railway service.
 - Set `PORT` only if you want to override Railway's injected port. The container
   defaults to `8080` locally and respects `PORT` in Railway.
 - Set `API_KEY` if you want to require `Authorization: Bearer <API_KEY>` for `/v1`

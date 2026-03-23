@@ -14,8 +14,7 @@ RUN apt-get update && \
 
 COPY requirements.txt /breezyvoice/requirements.txt
 
-RUN --mount=type=cache,target=/root/.cache/uv \
-    uv pip install -r requirements.txt --index-strategy unsafe-best-match
+RUN uv pip install -r requirements.txt --index-strategy unsafe-best-match
 
 COPY . .
 

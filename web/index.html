@@ -220,29 +220,13 @@
     }
 
     .progress-bar {
-      width: 18%;
+      width: 0%;
       height: 100%;
       border-radius: 999px;
       background: linear-gradient(90deg, #b85c38, #db9467, #b85c38);
       background-size: 200% 100%;
-      animation: loading-slide 1.35s ease-in-out infinite, shimmer 1.2s linear infinite;
-      transform: translateX(-130%);
-    }
-
-    .progress-steps {
-      margin-top: 10px;
-      color: var(--muted);
-      font-size: 0.88rem;
-      line-height: 1.6;
-    }
-
-    @keyframes loading-slide {
-      0% {
-        transform: translateX(-130%);
-      }
-      100% {
-        transform: translateX(580%);
-      }
+      transition: width 0.35s ease;
+      animation: shimmer 1.2s linear infinite;
     }
 
     @keyframes shimmer {
@@ -315,12 +299,15 @@
         <div id="progress-shell" class="progress-shell" aria-live="polite">
           <div class="progress-meta">
             <span id="progress-label">準備中</span>
-            <span id="elapsed-time">0s</span>
+            <span id="progress-count">0 / 0</span>
           </div>
           <div class="progress-track" aria-hidden="true">
-            <div class="progress-bar"></div>
+            <div id="progress-bar" class="progress-bar"></div>
           </div>
-          <div id="progress-steps" class="progress-steps">正在整理上傳資料。</div>
+          <div class="progress-meta" style="margin-top: 10px; margin-bottom: 0;">
+            <span id="progress-steps">正在整理上傳資料。</span>
+            <span id="elapsed-time">0s</span>
+          </div>
         </div>
 
         <div id="status" class="status" aria-live="polite"></div>
@@ -349,9 +336,10 @@ demo,歡迎使用 BreezyVoice 的批次文字轉語音功能</div>
     const progressShell = document.getElementById("progress-shell");
     const progressLabel = document.getElementById("progress-label");
     const progressSteps = document.getElementById("progress-steps");
+    const progressCount = document.getElementById("progress-count");
+    const progressBar = document.getElementById("progress-bar");
     const elapsedTime = document.getElementById("elapsed-time");
     let progressTimer = null;
-    let progressStageTimer = null;
 
     function setStatus(message, state = "") {
       statusEl.textContent = message;
@@ -368,48 +356,73 @@ demo,歡迎使用 BreezyVoice 的批次文字轉語音功能</div>
         clearInterval(progressTimer);
         progressTimer = null;
       }
-      if (progressStageTimer) {
-        clearTimeout(progressStageTimer);
-        progressStageTimer = null;
-      }
       progressShell.dataset.active = "false";
     }
 
     function startProgress() {
       const startedAt = Date.now();
       progressShell.dataset.active = "true";
-      progressLabel.textContent = "執行中";
+      progressLabel.textContent = "建立工作中";
       progressSteps.textContent = "正在上傳檔案並建立批次工作。";
+      progressCount.textContent = "0 / 0";
+      progressBar.style.width = "0%";
       elapsedTime.textContent = "0s";
 
       progressTimer = setInterval(() => {
         const seconds = Math.floor((Date.now() - startedAt) / 1000);
         elapsedTime.textContent = `${seconds}s`;
       }, 500);
+    }
 
-      const stages = [
-        { delay: 1400, label: "上傳完成", detail: "伺服器已收到 prompt 音檔、文字與 CSV。" },
-        { delay: 5000, label: "模型處理中", detail: "正在逐筆合成語音，批次越大等待越久。" },
-        { delay: 11000, label: "壓縮中", detail: "正在整理 WAV 並建立 ZIP 檔案。" }
-      ];
+    function updateProgress(job) {
+      const total = job.total || 0;
+      const completed = job.completed || 0;
+      const percent = total > 0 ? Math.min(100, (completed / total) * 100) : 0;
+      progressCount.textContent = `${completed} / ${total}`;
+      progressBar.style.width = `${percent}%`;
 
-      let index = 0;
-      const advance = () => {
-        if (index >= stages.length) {
-          progressLabel.textContent = "仍在執行";
-          progressSteps.textContent = "服務仍在處理中，請保持此頁面開啟。";
-          return;
+      if (job.status === "queued") {
+        progressLabel.textContent = "排隊中";
+        progressSteps.textContent = "批次工作已建立，等待開始處理。";
+      } else if (job.status === "processing") {
+        progressLabel.textContent = "模型處理中";
+        progressSteps.textContent = "正在逐筆合成語音。";
+      } else if (job.status === "completed") {
+        progressLabel.textContent = "完成";
+        progressSteps.textContent = "全部 WAV 已產生並打包完成。";
+        progressBar.style.width = "100%";
+      } else if (job.status === "failed") {
+        progressLabel.textContent = "失敗";
+        progressSteps.textContent = job.error || "批次工作失敗。";
+      }
+    }
+
+    async function fetchJson(url, apiKey, options = {}) {
+      const response = await fetch(url, {
+        ...options,
+        headers: {
+          ...(options.headers || {}),
+          ...(apiKey ? { Authorization: `Bearer ${apiKey}` } : {})
         }
-        const stage = stages[index];
-        progressLabel.textContent = stage.label;
-        progressSteps.textContent = stage.detail;
-        index += 1;
-        if (index < stages.length) {
-          progressStageTimer = setTimeout(advance, stages[index].delay - stage.delay);
-        }
-      };
+      });
 
-      progressStageTimer = setTimeout(advance, stages[0].delay);
+      if (!response.ok) {
+        let message = `請求失敗，HTTP ${response.status}`;
+        try {
+          const payload = await response.json();
+          if (payload && payload.detail) {
+            message = payload.detail;
+          }
+        } catch (error) {
+        }
+        throw new Error(message);
+      }
+
+      return response.json();
+    }
+
+    async function wait(ms) {
+      return new Promise((resolve) => setTimeout(resolve, ms));
     }
 
     form.addEventListener("submit", async (event) => {
@@ -437,30 +450,35 @@ demo,歡迎使用 BreezyVoice 的批次文字轉語音功能</div>
       formData.append("batch_csv", batchCsv);
 
       try {
-        const response = await fetch("/v1/batch/speech", {
+        const createdJob = await fetchJson("/v1/batch/jobs", apiKey, {
           method: "POST",
-          headers: apiKey ? { Authorization: `Bearer ${apiKey}` } : {},
           body: formData
         });
 
-        if (!response.ok) {
-          let message = `請求失敗，HTTP ${response.status}`;
-          try {
-            const payload = await response.json();
-            if (payload && payload.detail) {
-              message = payload.detail;
-            }
-          } catch (error) {
-          }
-          throw new Error(message);
+        updateProgress(createdJob);
+
+        let job = createdJob;
+        while (job.status === "queued" || job.status === "processing") {
+          await wait(1000);
+          job = await fetchJson(`/v1/batch/jobs/${job.job_id}`, apiKey);
+          updateProgress(job);
         }
 
-        const blob = await response.blob();
+        if (job.status !== "completed" || !job.download_url) {
+          throw new Error(job.error || "批次工作未成功完成。");
+        }
+
+        const downloadResponse = await fetch(job.download_url, {
+          headers: apiKey ? { Authorization: `Bearer ${apiKey}` } : {}
+        });
+        if (!downloadResponse.ok) {
+          throw new Error(`下載結果失敗，HTTP ${downloadResponse.status}`);
+        }
+
+        const blob = await downloadResponse.blob();
         const url = URL.createObjectURL(blob);
         downloadLink.href = url;
         downloadLink.style.display = "inline-flex";
-        progressLabel.textContent = "完成";
-        progressSteps.textContent = "ZIP 已準備完成，瀏覽器即將開始下載。";
         downloadLink.click();
         setStatus("批次合成完成，ZIP 已準備好下載。", "success");
       } catch (error) {

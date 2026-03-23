@@ -4,6 +4,8 @@ import csv
 import os
 import re
 import tempfile
+import threading
+import uuid
 import zipfile
 from contextlib import asynccontextmanager
 from io import BytesIO
@@ -49,6 +51,15 @@ class SpeechRequest(BaseModel):
     )
     response_format: str = ""
     speed: float = 1.0
+
+
+class BatchJobResponse(BaseModel):
+    job_id: str
+    status: str
+    completed: int
+    total: int
+    download_url: str | None = None
+    error: str | None = None
 
 
 def require_api_key(request: Request) -> None:
@@ -183,6 +194,108 @@ def create_bopomofo_converter() -> G2PWConverter:
         onnxruntime.InferenceSession = original_inference_session
 
 
+JOB_STORE: dict[str, dict[str, Any]] = {}
+JOB_STORE_LOCK = threading.Lock()
+JOB_ROOT = Path(tempfile.gettempdir()) / "breezyvoice-batch-jobs"
+JOB_ROOT.mkdir(parents=True, exist_ok=True)
+
+
+def get_job(job_id: str) -> dict[str, Any]:
+    with JOB_STORE_LOCK:
+        job = JOB_STORE.get(job_id)
+    if job is None:
+        raise HTTPException(
+            status_code=status.HTTP_404_NOT_FOUND,
+            detail="Batch job not found.",
+        )
+    return job
+
+
+def serialize_job(job_id: str, job: dict[str, Any]) -> BatchJobResponse:
+    download_url = None
+    if job["status"] == "completed":
+        download_url = f"/v1/batch/jobs/{job_id}/download"
+    return BatchJobResponse(
+        job_id=job_id,
+        status=job["status"],
+        completed=job["completed"],
+        total=job["total"],
+        download_url=download_url,
+        error=job.get("error"),
+    )
+
+
+def set_job_state(job_id: str, **updates: Any) -> dict[str, Any]:
+    with JOB_STORE_LOCK:
+        job = JOB_STORE[job_id]
+        job.update(updates)
+        return dict(job)
+
+
+def create_batch_job(
+    csv_bytes: bytes,
+    speaker_prompt_audio_bytes: bytes,
+    speaker_prompt_audio_filename: str,
+    speaker_prompt_text_transcription: str,
+) -> str:
+    rows = parse_batch_rows(csv_bytes)
+    job_id = uuid.uuid4().hex
+    job_dir = JOB_ROOT / job_id
+    job_dir.mkdir(parents=True, exist_ok=True)
+
+    prompt_suffix = Path(speaker_prompt_audio_filename or "prompt.wav").suffix or ".wav"
+    prompt_path = job_dir / f"prompt{prompt_suffix}"
+    prompt_path.write_bytes(speaker_prompt_audio_bytes)
+    csv_path = job_dir / "input.csv"
+    csv_path.write_bytes(csv_bytes)
+
+    with JOB_STORE_LOCK:
+        JOB_STORE[job_id] = {
+            "status": "queued",
+            "completed": 0,
+            "total": len(rows),
+            "rows": rows,
+            "prompt_path": str(prompt_path),
+            "prompt_text": speaker_prompt_text_transcription,
+            "zip_path": str(job_dir / "breezyvoice-batch.zip"),
+            "error": None,
+        }
+    return job_id
+
+
+def run_batch_job(app: FastAPI, job_id: str) -> None:
+    job = get_job(job_id)
+    set_job_state(job_id, status="processing")
+    try:
+        prompt_speech_16k = load_wav(job["prompt_path"], 16000)
+        prompt_text_bopomo = to_bopomofo(
+            app.state.cosyvoice,
+            app.state.bopomofo_converter,
+            job["prompt_text"],
+        )
+
+        zip_path = Path(job["zip_path"])
+        with zipfile.ZipFile(zip_path, "w", compression=zipfile.ZIP_DEFLATED) as zip_file:
+            manifest_rows = ["filename,text"]
+            for index, row in enumerate(job["rows"], start=1):
+                wav_bytes = synthesize_wav_bytes(
+                    app.state.cosyvoice,
+                    prompt_speech_16k,
+                    prompt_text_bopomo,
+                    row["text"],
+                    app.state.bopomofo_converter,
+                )
+                zip_file.writestr(f"{row['filename']}.wav", wav_bytes)
+                escaped_text = row["text"].replace('"', '""')
+                manifest_rows.append(f'{row["filename"]}.wav,"{escaped_text}"')
+                set_job_state(job_id, completed=index)
+            zip_file.writestr("manifest.csv", "\n".join(manifest_rows).encode("utf-8"))
+
+        set_job_state(job_id, status="completed")
+    except Exception as exc:
+        set_job_state(job_id, status="failed", error=str(exc))
+
+
 @asynccontextmanager
 async def lifespan(app: FastAPI):
     app.state.settings = Settings()
@@ -289,6 +402,81 @@ async def batch_speech_endpoint(
     zip_buffer.seek(0)
     return StreamingResponse(
         zip_buffer,
+        media_type="application/zip",
+        headers={"Content-Disposition": "attachment; filename=breezyvoice-batch.zip"},
+    )
+
+
+@router.post("/batch/jobs", response_model=BatchJobResponse)
+async def create_batch_job_endpoint(
+    request: Request,
+    speaker_prompt_audio: UploadFile = File(...),
+    speaker_prompt_text_transcription: str = Form(...),
+    batch_csv: UploadFile = File(...),
+):
+    require_api_key(request)
+
+    prompt_text = speaker_prompt_text_transcription.strip()
+    if not prompt_text:
+        raise HTTPException(
+            status_code=status.HTTP_400_BAD_REQUEST,
+            detail="speaker_prompt_text_transcription is required.",
+        )
+
+    csv_bytes = await batch_csv.read()
+    prompt_audio_bytes = await speaker_prompt_audio.read()
+    if not prompt_audio_bytes:
+        raise HTTPException(
+            status_code=status.HTTP_400_BAD_REQUEST,
+            detail="speaker_prompt_audio is required.",
+        )
+
+    job_id = create_batch_job(
+        csv_bytes=csv_bytes,
+        speaker_prompt_audio_bytes=prompt_audio_bytes,
+        speaker_prompt_audio_filename=speaker_prompt_audio.filename or "prompt.wav",
+        speaker_prompt_text_transcription=prompt_text,
+    )
+    worker = threading.Thread(
+        target=run_batch_job,
+        args=(request.app, job_id),
+        daemon=True,
+    )
+    worker.start()
+    return serialize_job(job_id, get_job(job_id))
+
+
+@router.get("/batch/jobs/{job_id}", response_model=BatchJobResponse)
+async def get_batch_job_endpoint(request: Request, job_id: str):
+    require_api_key(request)
+    return serialize_job(job_id, get_job(job_id))
+
+
+@router.get("/batch/jobs/{job_id}/download")
+async def download_batch_job_endpoint(request: Request, job_id: str):
+    require_api_key(request)
+    job = get_job(job_id)
+    if job["status"] != "completed":
+        raise HTTPException(
+            status_code=status.HTTP_409_CONFLICT,
+            detail="Batch job is not completed yet.",
+        )
+    zip_path = Path(job["zip_path"])
+    if not zip_path.exists():
+        raise HTTPException(
+            status_code=status.HTTP_404_NOT_FOUND,
+            detail="Batch ZIP file is not available.",
+        )
+    try:
+        zip_bytes = zip_path.read_bytes()
+    except Exception as exc:
+        raise HTTPException(
+            status_code=status.HTTP_500_INTERNAL_SERVER_ERROR,
+            detail=f"Failed to read batch ZIP: {exc}",
+        ) from exc
+
+    return StreamingResponse(
+        BytesIO(zip_bytes),
         media_type="application/zip",
         headers={"Content-Disposition": "attachment; filename=breezyvoice-batch.zip"},
     )

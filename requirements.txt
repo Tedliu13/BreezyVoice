@@ -14,7 +14,7 @@ lightning==2.2.4
 matplotlib==3.7.5
 networkx==3.1
 omegaconf==2.3.0
-onnxruntime-gpu==1.16.0; sys_platform == 'linux'
+onnxruntime==1.16.0; sys_platform == 'linux'
 openai-whisper==20231117
 protobuf==4.25
 pydantic==2.7.0

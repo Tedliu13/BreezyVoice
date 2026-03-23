@@ -1,0 +1,338 @@
+<!DOCTYPE html>
+<html lang="zh-Hant">
+<head>
+  <meta charset="UTF-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1.0">
+  <title>BreezyVoice Batch TTS</title>
+  <style>
+    :root {
+      --bg: #f5efe2;
+      --panel: rgba(255, 252, 246, 0.92);
+      --line: #d9c9a8;
+      --ink: #1f2421;
+      --muted: #5d665f;
+      --accent: #b85c38;
+      --accent-dark: #8b4024;
+      --success: #1f7a5a;
+      --error: #a12b2b;
+    }
+
+    * {
+      box-sizing: border-box;
+    }
+
+    body {
+      margin: 0;
+      min-height: 100vh;
+      font-family: "Noto Sans TC", "PingFang TC", "Microsoft JhengHei", sans-serif;
+      color: var(--ink);
+      background:
+        radial-gradient(circle at top left, rgba(184, 92, 56, 0.2), transparent 32%),
+        radial-gradient(circle at bottom right, rgba(89, 127, 109, 0.18), transparent 28%),
+        linear-gradient(135deg, #f8f1e4, #efe3c6 45%, #e2d8c4);
+      padding: 32px 18px;
+    }
+
+    .shell {
+      max-width: 960px;
+      margin: 0 auto;
+      background: var(--panel);
+      backdrop-filter: blur(8px);
+      border: 1px solid rgba(217, 201, 168, 0.9);
+      border-radius: 24px;
+      box-shadow: 0 26px 60px rgba(78, 61, 39, 0.18);
+      overflow: hidden;
+    }
+
+    .hero {
+      padding: 28px 28px 18px;
+      border-bottom: 1px solid rgba(217, 201, 168, 0.75);
+      background: linear-gradient(135deg, rgba(184, 92, 56, 0.09), rgba(255, 252, 246, 0));
+    }
+
+    .hero h1 {
+      margin: 0 0 10px;
+      font-family: Georgia, "Noto Serif TC", serif;
+      font-size: clamp(2rem, 4vw, 3.2rem);
+      font-weight: 700;
+      letter-spacing: 0.02em;
+    }
+
+    .hero p {
+      margin: 0;
+      max-width: 780px;
+      color: var(--muted);
+      line-height: 1.7;
+    }
+
+    .grid {
+      display: grid;
+      grid-template-columns: repeat(auto-fit, minmax(300px, 1fr));
+      gap: 22px;
+      padding: 26px 28px 30px;
+    }
+
+    .card {
+      background: rgba(255, 255, 255, 0.66);
+      border: 1px solid rgba(217, 201, 168, 0.88);
+      border-radius: 20px;
+      padding: 20px;
+    }
+
+    .card h2 {
+      margin: 0 0 14px;
+      font-size: 1.1rem;
+    }
+
+    label {
+      display: block;
+      margin-bottom: 8px;
+      font-size: 0.95rem;
+      font-weight: 700;
+    }
+
+    .field {
+      margin-bottom: 16px;
+    }
+
+    input[type="text"],
+    textarea,
+    input[type="file"] {
+      width: 100%;
+      border: 1px solid var(--line);
+      border-radius: 14px;
+      padding: 12px 14px;
+      background: rgba(255, 251, 244, 0.92);
+      color: var(--ink);
+      font: inherit;
+    }
+
+    textarea {
+      min-height: 130px;
+      resize: vertical;
+      line-height: 1.6;
+    }
+
+    .hint,
+    .template {
+      color: var(--muted);
+      font-size: 0.92rem;
+      line-height: 1.6;
+    }
+
+    .template {
+      margin-top: 10px;
+      padding: 12px 14px;
+      border-radius: 14px;
+      background: rgba(240, 232, 214, 0.8);
+      border: 1px dashed var(--line);
+      white-space: pre-wrap;
+      font-family: Consolas, monospace;
+    }
+
+    .actions {
+      display: flex;
+      flex-wrap: wrap;
+      gap: 12px;
+      align-items: center;
+      margin-top: 8px;
+    }
+
+    button,
+    .download-link {
+      appearance: none;
+      border: 0;
+      border-radius: 999px;
+      padding: 13px 18px;
+      font: inherit;
+      font-weight: 700;
+      text-decoration: none;
+      cursor: pointer;
+      transition: transform 0.16s ease, background 0.16s ease;
+    }
+
+    button {
+      background: var(--accent);
+      color: #fffaf4;
+    }
+
+    button:hover,
+    .download-link:hover {
+      transform: translateY(-1px);
+    }
+
+    button:disabled {
+      cursor: wait;
+      opacity: 0.7;
+      transform: none;
+    }
+
+    .download-link {
+      display: none;
+      background: #24493d;
+      color: white;
+    }
+
+    .status {
+      min-height: 24px;
+      margin-top: 14px;
+      font-size: 0.95rem;
+      font-weight: 600;
+    }
+
+    .status[data-state="success"] {
+      color: var(--success);
+    }
+
+    .status[data-state="error"] {
+      color: var(--error);
+    }
+
+    .footer {
+      padding: 0 28px 26px;
+      color: var(--muted);
+      font-size: 0.9rem;
+      line-height: 1.6;
+    }
+
+    @media (max-width: 640px) {
+      body {
+        padding: 16px;
+      }
+
+      .hero,
+      .grid,
+      .footer {
+        padding-left: 18px;
+        padding-right: 18px;
+      }
+    }
+  </style>
+</head>
+<body>
+  <main class="shell">
+    <section class="hero">
+      <h1>BreezyVoice Batch TTS</h1>
+      <p>上傳 prompt 音檔、對應文字與一份批次 CSV，網頁會呼叫同一台服務上的 API，將所有文字批次轉成 WAV，最後自動打包成 ZIP 供你下載。</p>
+    </section>
+
+    <section class="grid">
+      <form id="batch-form" class="card">
+        <h2>批次輸入</h2>
+
+        <div class="field">
+          <label for="api-key">API Key</label>
+          <input id="api-key" name="apiKey" type="text" placeholder="若後端有設定 API_KEY，請填在這裡">
+        </div>
+
+        <div class="field">
+          <label for="prompt-audio">Prompt 音檔</label>
+          <input id="prompt-audio" name="speaker_prompt_audio" type="file" accept=".wav,.mp3,.m4a,.flac,.ogg" required>
+        </div>
+
+        <div class="field">
+          <label for="prompt-text">Prompt 音檔文字</label>
+          <textarea id="prompt-text" name="speaker_prompt_text_transcription" placeholder="請貼上 prompt 音檔實際念出的內容" required></textarea>
+        </div>
+
+        <div class="field">
+          <label for="batch-csv">批次 CSV</label>
+          <input id="batch-csv" name="batch_csv" type="file" accept=".csv,text/csv" required>
+          <div class="hint">支援欄位：`text`、`content_to_synthesize`、`content`、`input`。可選檔名欄位：`filename`、`output_audio_filename`、`output_filename`、`id`、`name`。</div>
+        </div>
+
+        <div class="actions">
+          <button id="submit-button" type="submit">開始批次合成</button>
+          <a id="download-link" class="download-link" download="breezyvoice-batch.zip">下載 ZIP</a>
+        </div>
+
+        <div id="status" class="status" aria-live="polite"></div>
+      </form>
+
+      <section class="card">
+        <h2>CSV 範例</h2>
+        <div class="hint">最簡單的格式只要有一個文字欄位即可。若你要自訂輸出檔名，可以多放一個 `filename` 欄位。</div>
+        <div class="template">filename,text
+intro,今天天氣真好
+alert,冷氣團南下 北部轉涼白天氣溫降八度
+demo,歡迎使用 BreezyVoice 的批次文字轉語音功能</div>
+      </section>
+    </section>
+
+    <section class="footer">
+      API 端點為 <code>/v1/batch/speech</code>。同一頁面下載完成後，ZIP 內會包含所有 WAV 與一份 <code>manifest.csv</code>。
+    </section>
+  </main>
+
+  <script>
+    const form = document.getElementById("batch-form");
+    const statusEl = document.getElementById("status");
+    const submitButton = document.getElementById("submit-button");
+    const downloadLink = document.getElementById("download-link");
+
+    function setStatus(message, state = "") {
+      statusEl.textContent = message;
+      statusEl.dataset.state = state;
+    }
+
+    function resetDownload() {
+      downloadLink.style.display = "none";
+      downloadLink.removeAttribute("href");
+    }
+
+    form.addEventListener("submit", async (event) => {
+      event.preventDefault();
+      resetDownload();
+      setStatus("準備送出批次工作，這可能需要一些時間。");
+      submitButton.disabled = true;
+
+      const formData = new FormData();
+      const promptAudio = document.getElementById("prompt-audio").files[0];
+      const batchCsv = document.getElementById("batch-csv").files[0];
+      const promptText = document.getElementById("prompt-text").value.trim();
+      const apiKey = document.getElementById("api-key").value.trim();
+
+      if (!promptAudio || !batchCsv || !promptText) {
+        setStatus("請先補齊 prompt 音檔、prompt 文字與 CSV。", "error");
+        submitButton.disabled = false;
+        return;
+      }
+
+      formData.append("speaker_prompt_audio", promptAudio);
+      formData.append("speaker_prompt_text_transcription", promptText);
+      formData.append("batch_csv", batchCsv);
+
+      try {
+        const response = await fetch("/v1/batch/speech", {
+          method: "POST",
+          headers: apiKey ? { Authorization: `Bearer ${apiKey}` } : {},
+          body: formData
+        });
+
+        if (!response.ok) {
+          let message = `請求失敗，HTTP ${response.status}`;
+          try {
+            const payload = await response.json();
+            if (payload && payload.detail) {
+              message = payload.detail;
+            }
+          } catch (error) {
+          }
+          throw new Error(message);
+        }
+
+        const blob = await response.blob();
+        const url = URL.createObjectURL(blob);
+        downloadLink.href = url;
+        downloadLink.style.display = "inline-flex";
+        downloadLink.click();
+        setStatus("批次合成完成，ZIP 已準備好下載。", "success");
+      } catch (error) {
+        setStatus(error.message || "批次合成失敗。", "error");
+      } finally {
+        submitButton.disabled = false;
+      }
+    });
+  </script>
+</body>
+</html>

@@ -22,3 +22,4 @@ COPY . .
 EXPOSE 8080
 
 ENTRYPOINT ["/breezyvoice/.venv/bin/python"]
+CMD ["api.py"]

@@ -2,7 +2,7 @@ from pathlib import Path
 
 import openai
 
-client = openai.Client(base_url="http://localhost:8080", api_key="sk-template")
+client = openai.Client(base_url="http://localhost:8080/v1", api_key="sk-template")
 
 speech_file_path = Path(__file__).parent / "./results/speech.wav"
 response = client.audio.speech.create(

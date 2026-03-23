@@ -163,6 +163,31 @@ $ pip install openai
 $ python openai_api_inference.py
 ```
 
+For OpenAI-compatible clients, use the `/v1` prefix in the base URL, for example
+`http://localhost:8080/v1`.
+
+### Railway Deployment Notes
+
+- Connect this repository as a service directly. Railway will build from the repo's
+  `Dockerfile`.
+- Set `PORT` only if you want to override Railway's injected port. The container
+  defaults to `8080` locally and respects `PORT` in Railway.
+- Set `API_KEY` if you want to require `Authorization: Bearer <API_KEY>` for `/v1`
+  endpoints.
+- A persistent volume is optional, but recommended at
+  `/root/.cache/huggingface/` to avoid re-downloading model cache across deploys.
+
+### Web Batch TTS UI
+
+- Open `/` in the browser to use the built-in batch TTS web page.
+- Upload one prompt audio file, the matching prompt text, and a CSV file of target text.
+- The web page calls `POST /v1/batch/speech` and downloads a ZIP that contains all
+  generated WAV files plus `manifest.csv`.
+- Supported text columns in the uploaded CSV are `text`, `content_to_synthesize`,
+  `content`, or `input`.
+- Optional output filename columns are `filename`, `output_audio_filename`,
+  `output_filename`, `id`, or `name`.
+
 ---
 
 If you like our work, please cite:

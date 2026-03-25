@@ -310,33 +310,7 @@
     </section>
 
     <section class="grid">
-      <section class="card">
-        <h2>服務狀態</h2>
-        <div class="status-chip">
-          <span>模型狀態</span>
-          <span id="runtime-status-text">未載入</span>
-        </div>
-        <div class="stats">
-          <div class="stat">
-            <div class="stat-label">有人正在使用</div>
-            <div id="active-users-text" class="stat-value">否</div>
-          </div>
-          <div class="stat">
-            <div class="stat-label">當前使用數</div>
-            <div id="active-users-count" class="stat-value">0</div>
-          </div>
-          <div class="stat">
-            <div class="stat-label">累計使用人次</div>
-            <div id="usage-count" class="stat-value">0</div>
-          </div>
-          <div class="stat">
-            <div class="stat-label">累計轉換檔案數</div>
-            <div id="converted-files-count" class="stat-value">0</div>
-          </div>
-        </div>
-      </section>
-
-      <form id="batch-form" class="card">
+            <form id="batch-form" class="card">
         <h2>批次輸入</h2>
 
         <div class="field">
@@ -382,6 +356,32 @@
 
         <div id="status" class="status" aria-live="polite"></div>
       </form>
+
+      <section class="card">
+        <h2>服務狀態</h2>
+        <div class="status-chip">
+          <span>模型狀態</span>
+          <span id="runtime-status-text">未載入</span>
+        </div>
+        <div class="stats">
+          <div class="stat">
+            <div class="stat-label">有人正在使用</div>
+            <div id="active-users-text" class="stat-value">否</div>
+          </div>
+          <div class="stat">
+            <div class="stat-label">當前使用數</div>
+            <div id="active-users-count" class="stat-value">0</div>
+          </div>
+          <div class="stat">
+            <div class="stat-label">累計使用人次</div>
+            <div id="usage-count" class="stat-value">0</div>
+          </div>
+          <div class="stat">
+            <div class="stat-label">累計轉換檔案數</div>
+            <div id="converted-files-count" class="stat-value">0</div>
+          </div>
+        </div>
+      </section>
 
       <section class="card">
         <h2>CSV 範例</h2>
@@ -604,3 +604,4 @@ demo,歡迎使用 BreezyVoice 的批次文字轉語音功能</div>
   </script>
 </body>
 </html>
+

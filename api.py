@@ -292,6 +292,8 @@ def unload_runtime(app: FastAPI) -> None:
     with app.state.runtime_lock:
         if not getattr(app.state, "runtime_ready", False):
             return
+        if getattr(app.state, "active_users", 0) > 0:
+            return
         del app.state.cosyvoice
         del app.state.bopomofo_converter
         del app.state.prompt_speech_16k
@@ -304,6 +306,7 @@ def unload_runtime(app: FastAPI) -> None:
 def begin_usage(app: FastAPI) -> None:
     with app.state.metrics_lock:
         app.state.active_users += 1
+    app.state.runtime_last_used = time.time()
     if getattr(app.state, "runtime_ready", False):
         set_runtime_status(app, "使用中")
 
@@ -312,6 +315,7 @@ def end_usage(app: FastAPI) -> None:
     with app.state.metrics_lock:
         app.state.active_users = max(0, app.state.active_users - 1)
         active_users = app.state.active_users
+    app.state.runtime_last_used = time.time()
     if getattr(app.state, "runtime_ready", False):
         if active_users > 0:
             set_runtime_status(app, "使用中")
@@ -349,6 +353,9 @@ def runtime_idle_monitor(app: FastAPI) -> None:
     while not getattr(app.state, "shutdown_requested", False):
         idle_unload_seconds = app.state.settings.idle_unload_seconds
         if idle_unload_seconds > 0 and getattr(app.state, "runtime_ready", False):
+            if getattr(app.state, "active_users", 0) > 0:
+                time.sleep(5)
+                continue
             last_used = getattr(app.state, "runtime_last_used", 0.0)
             if last_used and (time.time() - last_used) >= idle_unload_seconds:
                 unload_runtime(app)

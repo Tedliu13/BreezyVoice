@@ -5,6 +5,7 @@ import os
 import re
 import tempfile
 import threading
+import time
 import uuid
 import zipfile
 from contextlib import asynccontextmanager
@@ -40,6 +41,14 @@ class Settings(BaseSettings):
     speaker_prompt_text_transcription: str = Field(
         default="在密碼學中，加密是將明文資訊改變為難以讀取的密文內容，使之不可讀的方法。只有擁有解密方法的對象，經由解密過程，才能將密文還原為正常可讀的內容。",
         description="Specifies the transcription of the speaker prompt audio.",
+    )
+    preload_model: bool = Field(
+        default=False,
+        description="Whether to preload the TTS model during application startup.",
+    )
+    idle_unload_seconds: int = Field(
+        default=600,
+        description="Unload the TTS runtime after this many idle seconds. Set 0 to disable.",
     )
 
 
@@ -196,6 +205,49 @@ def create_bopomofo_converter() -> G2PWConverter:
         onnxruntime.InferenceSession = original_inference_session
 
 
+def ensure_runtime(app: FastAPI) -> None:
+    if getattr(app.state, "runtime_ready", False):
+        app.state.runtime_last_used = time.time()
+        return
+
+    with app.state.runtime_lock:
+        if getattr(app.state, "runtime_ready", False):
+            app.state.runtime_last_used = time.time()
+            return
+        app.state.cosyvoice = CustomCosyVoice(app.state.settings.model_path)
+        app.state.bopomofo_converter = create_bopomofo_converter()
+        app.state.prompt_speech_16k = load_wav(
+            app.state.settings.speaker_prompt_audio_path, 16000
+        )
+        app.state.runtime_ready = True
+        app.state.runtime_last_used = time.time()
+
+
+def touch_runtime(app: FastAPI) -> None:
+    app.state.runtime_last_used = time.time()
+
+
+def unload_runtime(app: FastAPI) -> None:
+    with app.state.runtime_lock:
+        if not getattr(app.state, "runtime_ready", False):
+            return
+        del app.state.cosyvoice
+        del app.state.bopomofo_converter
+        del app.state.prompt_speech_16k
+        app.state.runtime_ready = False
+        app.state.runtime_last_used = 0.0
+
+
+def runtime_idle_monitor(app: FastAPI) -> None:
+    while not getattr(app.state, "shutdown_requested", False):
+        idle_unload_seconds = app.state.settings.idle_unload_seconds
+        if idle_unload_seconds > 0 and getattr(app.state, "runtime_ready", False):
+            last_used = getattr(app.state, "runtime_last_used", 0.0)
+            if last_used and (time.time() - last_used) >= idle_unload_seconds:
+                unload_runtime(app)
+        time.sleep(5)
+
+
 JOB_STORE: dict[str, dict[str, Any]] = {}
 JOB_STORE_LOCK = threading.Lock()
 JOB_ROOT = Path(tempfile.gettempdir()) / "breezyvoice-batch-jobs"
@@ -273,6 +325,7 @@ def run_batch_job(app: FastAPI, job_id: str) -> None:
     job = get_job(job_id)
     set_job_state(job_id, status="processing")
     try:
+        ensure_runtime(app)
         prompt_speech_16k = load_wav(job["prompt_path"], 16000)
         prompt_text_bopomo = to_bopomofo(
             app.state.cosyvoice,
@@ -300,6 +353,7 @@ def run_batch_job(app: FastAPI, job_id: str) -> None:
                 escaped_text = row["text"].replace('"', '""')
                 manifest_rows.append(f'{row["filename"]}.wav,"{escaped_text}"')
                 set_job_state(job_id, completed=index)
+                touch_runtime(app)
             zip_file.writestr("manifest.csv", "\n".join(manifest_rows).encode("utf-8"))
 
         set_job_state(job_id, status="completed", current=job["total"])
@@ -310,14 +364,21 @@ def run_batch_job(app: FastAPI, job_id: str) -> None:
 @asynccontextmanager
 async def lifespan(app: FastAPI):
     app.state.settings = Settings()
-    app.state.cosyvoice = CustomCosyVoice(app.state.settings.model_path)
-    app.state.bopomofo_converter = create_bopomofo_converter()
-    app.state.prompt_speech_16k = load_wav(
-        app.state.settings.speaker_prompt_audio_path, 16000
+    app.state.runtime_lock = threading.Lock()
+    app.state.runtime_ready = False
+    app.state.runtime_last_used = 0.0
+    app.state.shutdown_requested = False
+    app.state.runtime_monitor = threading.Thread(
+        target=runtime_idle_monitor,
+        args=(app,),
+        daemon=True,
     )
+    app.state.runtime_monitor.start()
+    if app.state.settings.preload_model:
+        ensure_runtime(app)
     yield
-    del app.state.cosyvoice
-    del app.state.bopomofo_converter
+    app.state.shutdown_requested = True
+    unload_runtime(app)
 
 
 app = FastAPI(lifespan=lifespan)
@@ -349,6 +410,7 @@ async def get_models(request: Request):
 @router.post("/audio/speech")
 async def speach_endpoint(request: Request, payload: SpeechRequest):
     require_api_key(request)
+    ensure_runtime(request.app)
     prompt_text_bopomo = to_bopomofo(
         request.app.state.cosyvoice,
         request.app.state.bopomofo_converter,
@@ -361,6 +423,7 @@ async def speach_endpoint(request: Request, payload: SpeechRequest):
         payload.input,
         request.app.state.bopomofo_converter,
     )
+    touch_runtime(request.app)
     return StreamingResponse(
         BytesIO(audio_bytes),
         media_type="audio/wav",
@@ -376,6 +439,7 @@ async def batch_speech_endpoint(
     batch_csv: UploadFile = File(...),
 ):
     require_api_key(request)
+    ensure_runtime(request.app)
 
     prompt_text = speaker_prompt_text_transcription.strip()
     if not prompt_text:
@@ -408,6 +472,7 @@ async def batch_speech_endpoint(
             zip_file.writestr(f"{row['filename']}.wav", wav_bytes)
             escaped_text = row["text"].replace('"', '""')
             manifest_rows.append(f'{row["filename"]}.wav,"{escaped_text}"')
+            touch_runtime(request.app)
         zip_file.writestr("manifest.csv", "\n".join(manifest_rows).encode("utf-8"))
 
     zip_buffer.seek(0)

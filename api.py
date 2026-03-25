@@ -1,6 +1,7 @@
 # OpenAI API Spec. Reference: https://platform.openai.com/docs/api-reference/audio/createSpeech
 
 import csv
+import json
 import os
 import re
 import tempfile
@@ -50,6 +51,10 @@ class Settings(BaseSettings):
         default=600,
         description="Unload the TTS runtime after this many idle seconds. Set 0 to disable.",
     )
+    stats_file_path: str = Field(
+        default="/root/.cache/huggingface/breezyvoice-stats.json",
+        description="Path to the persistent stats file. Put this on a mounted volume if you want counters to survive restarts.",
+    )
 
 
 class SpeechRequest(BaseModel):
@@ -71,6 +76,13 @@ class BatchJobResponse(BaseModel):
     current_filename: str | None = None
     download_url: str | None = None
     error: str | None = None
+
+
+class RuntimeStatusResponse(BaseModel):
+    model_status: str
+    active_users: int
+    usage_count: int
+    converted_files_count: int
 
 
 def require_api_key(request: Request) -> None:
@@ -205,6 +217,41 @@ def create_bopomofo_converter() -> G2PWConverter:
         onnxruntime.InferenceSession = original_inference_session
 
 
+def set_runtime_status(app: FastAPI, status_text: str) -> None:
+    app.state.runtime_status = status_text
+
+
+def load_persistent_stats(app: FastAPI) -> None:
+    stats_path = Path(app.state.settings.stats_file_path)
+    stats_path.parent.mkdir(parents=True, exist_ok=True)
+    if not stats_path.exists():
+        app.state.stats_file_path = stats_path
+        app.state.usage_count = 0
+        app.state.converted_files_count = 0
+        return
+
+    try:
+        payload = json.loads(stats_path.read_text(encoding="utf-8"))
+    except Exception:
+        payload = {}
+
+    app.state.stats_file_path = stats_path
+    app.state.usage_count = int(payload.get("usage_count", 0) or 0)
+    app.state.converted_files_count = int(payload.get("converted_files_count", 0) or 0)
+
+
+def save_persistent_stats(app: FastAPI) -> None:
+    stats_path = app.state.stats_file_path
+    payload = {
+        "usage_count": app.state.usage_count,
+        "converted_files_count": app.state.converted_files_count,
+    }
+    stats_path.write_text(
+        json.dumps(payload, ensure_ascii=False, indent=2),
+        encoding="utf-8",
+    )
+
+
 def ensure_runtime(app: FastAPI) -> None:
     if getattr(app.state, "runtime_ready", False):
         app.state.runtime_last_used = time.time()
@@ -214,13 +261,27 @@ def ensure_runtime(app: FastAPI) -> None:
         if getattr(app.state, "runtime_ready", False):
             app.state.runtime_last_used = time.time()
             return
-        app.state.cosyvoice = CustomCosyVoice(app.state.settings.model_path)
-        app.state.bopomofo_converter = create_bopomofo_converter()
-        app.state.prompt_speech_16k = load_wav(
-            app.state.settings.speaker_prompt_audio_path, 16000
-        )
-        app.state.runtime_ready = True
-        app.state.runtime_last_used = time.time()
+        set_runtime_status(app, "載入中")
+        app.state.runtime_loading = True
+        try:
+            app.state.cosyvoice = CustomCosyVoice(app.state.settings.model_path)
+            app.state.bopomofo_converter = create_bopomofo_converter()
+            app.state.prompt_speech_16k = load_wav(
+                app.state.settings.speaker_prompt_audio_path, 16000
+            )
+            app.state.runtime_ready = True
+            app.state.runtime_last_used = time.time()
+            if app.state.active_users > 0:
+                set_runtime_status(app, "使用中")
+            else:
+                set_runtime_status(app, "已載入")
+        except Exception:
+            app.state.runtime_ready = False
+            app.state.runtime_last_used = 0.0
+            set_runtime_status(app, "未載入")
+            raise
+        finally:
+            app.state.runtime_loading = False
 
 
 def touch_runtime(app: FastAPI) -> None:
@@ -236,6 +297,52 @@ def unload_runtime(app: FastAPI) -> None:
         del app.state.prompt_speech_16k
         app.state.runtime_ready = False
         app.state.runtime_last_used = 0.0
+        app.state.runtime_loading = False
+        set_runtime_status(app, "已閒置卸載")
+
+
+def begin_usage(app: FastAPI) -> None:
+    with app.state.metrics_lock:
+        app.state.active_users += 1
+    if getattr(app.state, "runtime_ready", False):
+        set_runtime_status(app, "使用中")
+
+
+def end_usage(app: FastAPI) -> None:
+    with app.state.metrics_lock:
+        app.state.active_users = max(0, app.state.active_users - 1)
+        active_users = app.state.active_users
+    if getattr(app.state, "runtime_ready", False):
+        if active_users > 0:
+            set_runtime_status(app, "使用中")
+        else:
+            set_runtime_status(app, "已載入")
+
+
+def record_usage(app: FastAPI, converted_files: int = 0) -> None:
+    with app.state.metrics_lock:
+        app.state.usage_count += 1
+        app.state.converted_files_count += converted_files
+        save_persistent_stats(app)
+
+
+def record_converted_files(app: FastAPI, converted_files: int) -> None:
+    with app.state.metrics_lock:
+        app.state.converted_files_count += converted_files
+        save_persistent_stats(app)
+
+
+def get_runtime_status_payload(app: FastAPI) -> RuntimeStatusResponse:
+    with app.state.metrics_lock:
+        active_users = app.state.active_users
+        usage_count = app.state.usage_count
+        converted_files_count = app.state.converted_files_count
+    return RuntimeStatusResponse(
+        model_status=app.state.runtime_status,
+        active_users=active_users,
+        usage_count=usage_count,
+        converted_files_count=converted_files_count,
+    )
 
 
 def runtime_idle_monitor(app: FastAPI) -> None:
@@ -325,6 +432,7 @@ def run_batch_job(app: FastAPI, job_id: str) -> None:
     job = get_job(job_id)
     set_job_state(job_id, status="processing")
     try:
+        begin_usage(app)
         ensure_runtime(app)
         prompt_speech_16k = load_wav(job["prompt_path"], 16000)
         prompt_text_bopomo = to_bopomofo(
@@ -354,19 +462,27 @@ def run_batch_job(app: FastAPI, job_id: str) -> None:
                 manifest_rows.append(f'{row["filename"]}.wav,"{escaped_text}"')
                 set_job_state(job_id, completed=index)
                 touch_runtime(app)
+                record_converted_files(app, 1)
             zip_file.writestr("manifest.csv", "\n".join(manifest_rows).encode("utf-8"))
 
         set_job_state(job_id, status="completed", current=job["total"])
     except Exception as exc:
         set_job_state(job_id, status="failed", error=str(exc))
+    finally:
+        end_usage(app)
 
 
 @asynccontextmanager
 async def lifespan(app: FastAPI):
     app.state.settings = Settings()
     app.state.runtime_lock = threading.Lock()
+    app.state.metrics_lock = threading.Lock()
     app.state.runtime_ready = False
+    app.state.runtime_loading = False
     app.state.runtime_last_used = 0.0
+    app.state.runtime_status = "未載入"
+    app.state.active_users = 0
+    load_persistent_stats(app)
     app.state.shutdown_requested = False
     app.state.runtime_monitor = threading.Thread(
         target=runtime_idle_monitor,
@@ -391,6 +507,11 @@ async def index():
     return FileResponse(WEB_DIR / "index.html")
 
 
+@router.get("/runtime/status", response_model=RuntimeStatusResponse)
+async def runtime_status_endpoint():
+    return get_runtime_status_payload(app)
+
+
 @router.get("/models")
 async def get_models(request: Request):
     require_api_key(request)
@@ -410,25 +531,30 @@ async def get_models(request: Request):
 @router.post("/audio/speech")
 async def speach_endpoint(request: Request, payload: SpeechRequest):
     require_api_key(request)
+    begin_usage(request.app)
     ensure_runtime(request.app)
-    prompt_text_bopomo = to_bopomofo(
-        request.app.state.cosyvoice,
-        request.app.state.bopomofo_converter,
-        request.app.state.settings.speaker_prompt_text_transcription,
-    )
-    audio_bytes = synthesize_wav_bytes(
-        request.app.state.cosyvoice,
-        request.app.state.prompt_speech_16k,
-        prompt_text_bopomo,
-        payload.input,
-        request.app.state.bopomofo_converter,
-    )
-    touch_runtime(request.app)
-    return StreamingResponse(
-        BytesIO(audio_bytes),
-        media_type="audio/wav",
-        headers={"Content-Disposition": "attachment; filename=output.wav"},
-    )
+    try:
+        prompt_text_bopomo = to_bopomofo(
+            request.app.state.cosyvoice,
+            request.app.state.bopomofo_converter,
+            request.app.state.settings.speaker_prompt_text_transcription,
+        )
+        audio_bytes = synthesize_wav_bytes(
+            request.app.state.cosyvoice,
+            request.app.state.prompt_speech_16k,
+            prompt_text_bopomo,
+            payload.input,
+            request.app.state.bopomofo_converter,
+        )
+        touch_runtime(request.app)
+        record_usage(request.app, converted_files=1)
+        return StreamingResponse(
+            BytesIO(audio_bytes),
+            media_type="audio/wav",
+            headers={"Content-Disposition": "attachment; filename=output.wav"},
+        )
+    finally:
+        end_usage(request.app)
 
 
 @router.post("/batch/speech")
@@ -439,48 +565,53 @@ async def batch_speech_endpoint(
     batch_csv: UploadFile = File(...),
 ):
     require_api_key(request)
-    ensure_runtime(request.app)
+    begin_usage(request.app)
+    try:
+        ensure_runtime(request.app)
 
-    prompt_text = speaker_prompt_text_transcription.strip()
-    if not prompt_text:
-        raise HTTPException(
-            status_code=status.HTTP_400_BAD_REQUEST,
-            detail="speaker_prompt_text_transcription is required.",
+        prompt_text = speaker_prompt_text_transcription.strip()
+        if not prompt_text:
+            raise HTTPException(
+                status_code=status.HTTP_400_BAD_REQUEST,
+                detail="speaker_prompt_text_transcription is required.",
+            )
+
+        csv_bytes = await batch_csv.read()
+        rows = parse_batch_rows(csv_bytes)
+
+        prompt_speech_16k = read_prompt_audio(speaker_prompt_audio)
+        prompt_text_bopomo = to_bopomofo(
+            request.app.state.cosyvoice,
+            request.app.state.bopomofo_converter,
+            prompt_text,
         )
 
-    csv_bytes = await batch_csv.read()
-    rows = parse_batch_rows(csv_bytes)
+        zip_buffer = BytesIO()
+        with zipfile.ZipFile(zip_buffer, "w", compression=zipfile.ZIP_DEFLATED) as zip_file:
+            manifest_rows = ["filename,text"]
+            for row in rows:
+                wav_bytes = synthesize_wav_bytes(
+                    request.app.state.cosyvoice,
+                    prompt_speech_16k,
+                    prompt_text_bopomo,
+                    row["text"],
+                    request.app.state.bopomofo_converter,
+                )
+                zip_file.writestr(f"{row['filename']}.wav", wav_bytes)
+                escaped_text = row["text"].replace('"', '""')
+                manifest_rows.append(f'{row["filename"]}.wav,"{escaped_text}"')
+                touch_runtime(request.app)
+            zip_file.writestr("manifest.csv", "\n".join(manifest_rows).encode("utf-8"))
 
-    prompt_speech_16k = read_prompt_audio(speaker_prompt_audio)
-    prompt_text_bopomo = to_bopomofo(
-        request.app.state.cosyvoice,
-        request.app.state.bopomofo_converter,
-        prompt_text,
-    )
-
-    zip_buffer = BytesIO()
-    with zipfile.ZipFile(zip_buffer, "w", compression=zipfile.ZIP_DEFLATED) as zip_file:
-        manifest_rows = ["filename,text"]
-        for row in rows:
-            wav_bytes = synthesize_wav_bytes(
-                request.app.state.cosyvoice,
-                prompt_speech_16k,
-                prompt_text_bopomo,
-                row["text"],
-                request.app.state.bopomofo_converter,
-            )
-            zip_file.writestr(f"{row['filename']}.wav", wav_bytes)
-            escaped_text = row["text"].replace('"', '""')
-            manifest_rows.append(f'{row["filename"]}.wav,"{escaped_text}"')
-            touch_runtime(request.app)
-        zip_file.writestr("manifest.csv", "\n".join(manifest_rows).encode("utf-8"))
-
-    zip_buffer.seek(0)
-    return StreamingResponse(
-        zip_buffer,
-        media_type="application/zip",
-        headers={"Content-Disposition": "attachment; filename=breezyvoice-batch.zip"},
-    )
+        zip_buffer.seek(0)
+        record_usage(request.app, converted_files=len(rows))
+        return StreamingResponse(
+            zip_buffer,
+            media_type="application/zip",
+            headers={"Content-Disposition": "attachment; filename=breezyvoice-batch.zip"},
+        )
+    finally:
+        end_usage(request.app)
 
 
 @router.post("/batch/jobs", response_model=BatchJobResponse)
@@ -513,6 +644,7 @@ async def create_batch_job_endpoint(
         speaker_prompt_audio_filename=speaker_prompt_audio.filename or "prompt.wav",
         speaker_prompt_text_transcription=prompt_text,
     )
+    record_usage(request.app, converted_files=0)
     worker = threading.Thread(
         target=run_batch_job,
         args=(request.app, job_id),

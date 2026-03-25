@@ -12,7 +12,6 @@
       --ink: #1f2421;
       --muted: #5d665f;
       --accent: #b85c38;
-      --accent-dark: #8b4024;
       --success: #1f7a5a;
       --error: #a12b2b;
     }
@@ -82,6 +81,43 @@
     .card h2 {
       margin: 0 0 14px;
       font-size: 1.1rem;
+    }
+
+    .stats {
+      display: grid;
+      grid-template-columns: repeat(2, minmax(0, 1fr));
+      gap: 12px;
+      margin-top: 12px;
+    }
+
+    .stat {
+      padding: 14px;
+      border-radius: 16px;
+      background: rgba(255, 251, 244, 0.88);
+      border: 1px solid rgba(217, 201, 168, 0.72);
+    }
+
+    .stat-label {
+      color: var(--muted);
+      font-size: 0.85rem;
+      margin-bottom: 6px;
+    }
+
+    .stat-value {
+      font-size: 1.4rem;
+      font-weight: 700;
+      line-height: 1.2;
+    }
+
+    .status-chip {
+      display: inline-flex;
+      align-items: center;
+      gap: 8px;
+      padding: 10px 14px;
+      border-radius: 999px;
+      background: rgba(255, 251, 244, 0.88);
+      border: 1px solid rgba(217, 201, 168, 0.72);
+      font-weight: 700;
     }
 
     label {
@@ -274,6 +310,32 @@
     </section>
 
     <section class="grid">
+      <section class="card">
+        <h2>服務狀態</h2>
+        <div class="status-chip">
+          <span>模型狀態</span>
+          <span id="runtime-status-text">未載入</span>
+        </div>
+        <div class="stats">
+          <div class="stat">
+            <div class="stat-label">有人正在使用</div>
+            <div id="active-users-text" class="stat-value">否</div>
+          </div>
+          <div class="stat">
+            <div class="stat-label">當前使用數</div>
+            <div id="active-users-count" class="stat-value">0</div>
+          </div>
+          <div class="stat">
+            <div class="stat-label">累計使用人次</div>
+            <div id="usage-count" class="stat-value">0</div>
+          </div>
+          <div class="stat">
+            <div class="stat-label">累計轉換檔案數</div>
+            <div id="converted-files-count" class="stat-value">0</div>
+          </div>
+        </div>
+      </section>
+
       <form id="batch-form" class="card">
         <h2>批次輸入</h2>
 
@@ -348,6 +410,11 @@ demo,歡迎使用 BreezyVoice 的批次文字轉語音功能</div>
     const progressCurrent = document.getElementById("progress-current");
     const progressBar = document.getElementById("progress-bar");
     const elapsedTime = document.getElementById("elapsed-time");
+    const runtimeStatusText = document.getElementById("runtime-status-text");
+    const activeUsersText = document.getElementById("active-users-text");
+    const activeUsersCount = document.getElementById("active-users-count");
+    const usageCount = document.getElementById("usage-count");
+    const convertedFilesCount = document.getElementById("converted-files-count");
     let progressTimer = null;
 
     function setStatus(message, state = "") {
@@ -420,7 +487,15 @@ demo,歡迎使用 BreezyVoice 的批次文字轉語音功能</div>
       }
     }
 
-    async function fetchJson(url, apiKey, options = {}) {
+    function updateRuntimeStatus(payload) {
+      runtimeStatusText.textContent = payload.model_status || "未載入";
+      activeUsersCount.textContent = `${payload.active_users || 0}`;
+      activeUsersText.textContent = (payload.active_users || 0) > 0 ? "是" : "否";
+      usageCount.textContent = `${payload.usage_count || 0}`;
+      convertedFilesCount.textContent = `${payload.converted_files_count || 0}`;
+    }
+
+    async function fetchJson(url, apiKey = "", options = {}) {
       const response = await fetch(url, {
         ...options,
         headers: {
@@ -447,6 +522,17 @@ demo,歡迎使用 BreezyVoice 的批次文字轉語音功能</div>
     async function wait(ms) {
       return new Promise((resolve) => setTimeout(resolve, ms));
     }
+
+    async function refreshRuntimeStatus() {
+      try {
+        const payload = await fetchJson("/v1/runtime/status");
+        updateRuntimeStatus(payload);
+      } catch (error) {
+      }
+    }
+
+    refreshRuntimeStatus();
+    setInterval(refreshRuntimeStatus, 5000);
 
     form.addEventListener("submit", async (event) => {
       event.preventDefault();
@@ -479,12 +565,14 @@ demo,歡迎使用 BreezyVoice 的批次文字轉語音功能</div>
         });
 
         updateProgress(createdJob);
+        await refreshRuntimeStatus();
 
         let job = createdJob;
         while (job.status === "queued" || job.status === "processing") {
           await wait(1000);
           job = await fetchJson(`/v1/batch/jobs/${job.job_id}`, apiKey);
           updateProgress(job);
+          await refreshRuntimeStatus();
         }
 
         if (job.status !== "completed" || !job.download_url) {
@@ -503,8 +591,10 @@ demo,歡迎使用 BreezyVoice 的批次文字轉語音功能</div>
         downloadLink.href = url;
         downloadLink.style.display = "inline-flex";
         downloadLink.click();
+        await refreshRuntimeStatus();
         setStatus("批次合成完成，ZIP 已準備好下載。", "success");
       } catch (error) {
+        await refreshRuntimeStatus();
         setStatus(error.message || "批次合成失敗。", "error");
       } finally {
         stopProgress();
